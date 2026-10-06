@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database / local storage
+chroma_db/
+*.db
+
+# Temporary files
+tmp/
+temp/
+
+# Python cache
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
