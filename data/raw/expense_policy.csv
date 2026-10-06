@@ -1,0 +1,5 @@
+category,limit,approval_required
+Travel,5000,Yes
+Food,1500,No
+Accommodation,7000,Yes
+Office Supplies,3000,Yes

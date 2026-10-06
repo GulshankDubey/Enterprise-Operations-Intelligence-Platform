@@ -1,0 +1,8 @@
+IT Support Policy
+
+All employees must report technical issues through the
+company IT support portal.
+
+Critical incidents should be reported immediately.
+
+Employees must not share company passwords with other users.
