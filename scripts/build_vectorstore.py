@@ -1,56 +1,61 @@
 from app.ingestion.processor import ingest_directory
 from app.rag.splitter import split_documents
-from app.rag.vectorstore import create_vectorstore
+from app.rag.vectorstore import (
+    create_vectorstore,
+    get_vectorstore_count,
+)
 
 
 def main():
-
-    print("=" * 60)
-    print("ENTERPRISE RAG - VECTOR DATABASE BUILD")
-    print("=" * 60)
-
-    # --------------------------------------------------
-    # Step 1: Load documents
-    # --------------------------------------------------
-
-    print("\n[1/3] Loading documents...")
+    print("Step 1: Loading source documents...")
 
     documents = ingest_directory("data/raw")
 
-    print(
-        f"Loaded {len(documents)} document(s)."
-    )
+    if not documents:
+        raise ValueError(
+            "No documents found in data/raw."
+        )
 
-    # --------------------------------------------------
-    # Step 2: Split documents
-    # --------------------------------------------------
+    print(f"Documents loaded: {len(documents)}")
 
-    print("\n[2/3] Splitting documents into chunks...")
+    print("\nStep 2: Splitting documents into chunks...")
 
     chunks = split_documents(documents)
 
-    print(
-        f"Created {len(chunks)} chunks."
-    )
+    # Assign a repeatable position to each chunk within
+    # its source document and page.
+    chunk_positions = {}
 
-    # --------------------------------------------------
-    # Step 3: Create vector database
-    # --------------------------------------------------
+    for chunk in chunks:
+        metadata = chunk.metadata
 
-    print("\n[3/3] Creating ChromaDB...")
+        source = (
+            metadata.get("source")
+            or metadata.get("file_path")
+            or metadata.get("filename")
+            or "unknown"
+        )
+        page = metadata.get("page", "")
+
+        position_key = (source, page)
+
+        chunk_index = chunk_positions.get(position_key, 0)
+        metadata["chunk_index"] = chunk_index
+
+        chunk_positions[position_key] = chunk_index + 1
+
+    print(f"Chunks created: {len(chunks)}")
+
+    print("\nStep 3: Upserting chunks into ChromaDB...")
 
     vectorstore = create_vectorstore(chunks)
 
-    print("\n" + "=" * 60)
-    print("VECTOR DATABASE CREATED SUCCESSFULLY")
-    print("=" * 60)
+    print("\nStep 4: Checking database count...")
 
-    print(f"Collection: enterprise_documents")
-    print(f"Chunks stored: {len(chunks)}")
-    print("Location: data/chroma_db")
+    count = get_vectorstore_count()
 
-    # Prevent unused-variable warnings
-    _ = vectorstore
+    print(f"ChromaDB records stored: {count}")
+    print("Vector store build completed successfully.")
 
 
 if __name__ == "__main__":
