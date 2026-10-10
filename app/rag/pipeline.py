@@ -1,3 +1,4 @@
+
 import os
 
 from dotenv import load_dotenv
@@ -15,70 +16,40 @@ def extract_text_from_response(response):
     """
     Extract plain text from Gemini's response.
 
-    Handles both traditional string responses and
-    structured content responses.
+    Handles string and structured content responses.
     """
-
     content = response.content
-
-    # ----------------------------------------------
-    # Normal string
-    # ----------------------------------------------
 
     if isinstance(content, str):
         return content
 
-    # ----------------------------------------------
-    # Structured content
-    # ----------------------------------------------
-
     if isinstance(content, list):
-
         text_parts = []
 
         for item in content:
-
             if isinstance(item, dict):
-
                 if item.get("type") == "text":
-
-                    text = item.get(
-                        "text",
-                        "",
-                    )
+                    text = item.get("text", "")
 
                     if text:
                         text_parts.append(text)
 
             elif isinstance(item, str):
-
                 text_parts.append(item)
 
         return "\n".join(text_parts)
-
-    # ----------------------------------------------
-    # Fallback
-    # ----------------------------------------------
 
     return str(content)
 
 
 def build_context(documents):
     """
-    Convert retrieved documents into a single context string.
+    Convert retrieved documents into a context string.
     """
-
     context_parts = []
 
-    for index, document in enumerate(
-        documents,
-        start=1,
-    ):
-
-        source = document.metadata.get(
-            "source",
-            "unknown",
-        )
+    for index, document in enumerate(documents, start=1):
+        source = document.metadata.get("source", "unknown")
 
         context_parts.append(
             f"[Source {index}: {source}]\n"
@@ -91,33 +62,42 @@ def build_context(documents):
 def ask_rag(
     question: str,
     k: int = 4,
+    file_type: str | None = None,
+    source: str | None = None,
 ):
     """
     Complete RAG pipeline:
 
     Question
-       ↓
-    Retriever
-       ↓
-    Relevant documents
-       ↓
-    Context
-       ↓
-    Gemini
-       ↓
-    Answer
-    """
+        -> Metadata-filtered retriever
+        -> Relevant documents
+        -> Context
+        -> Gemini
+        -> Answer and sources
 
+    Args:
+        question: User's question.
+        k: Maximum number of chunks to retrieve.
+        file_type: Optional file type filter.
+        source: Optional source filename filter.
+
+    Returns:
+        Dictionary containing the answer and source filenames.
+    """
     if not GOOGLE_API_KEY:
         raise ValueError(
             "GOOGLE_API_KEY is not configured."
         )
 
-    # ----------------------------------------------
-    # Step 1: Retriever
-    # ----------------------------------------------
+    if not question or not question.strip():
+        raise ValueError("Question cannot be empty.")
 
-    retriever = get_retriever(k=k)
+    # Step 1: Retrieve relevant documents.
+    retriever = get_retriever(
+        k=k,
+        file_type=file_type,
+        source=source,
+    )
 
     documents = retriever.invoke(question)
 
@@ -130,25 +110,19 @@ def ask_rag(
             "sources": [],
         }
 
-    # ----------------------------------------------
-    # Step 2: Build context
-    # ----------------------------------------------
-
+    # Step 2: Build context from retrieved documents.
     context = build_context(documents)
 
-    # ----------------------------------------------
-    # Step 3: Create prompt
-    # ----------------------------------------------
-
+    # Step 3: Prepare the prompt.
     prompt = f"""
 You are an Enterprise Operations Intelligence Assistant.
 
-Your job is to answer questions using ONLY the
-provided enterprise context.
+Answer the user's question using ONLY the supplied
+enterprise document context.
 
-If the answer is not available in the context,
-say clearly that the information was not found
-in the available enterprise documents.
+If the answer is not available in the context, state
+clearly that the information was not found in the
+available enterprise documents.
 
 Do not invent policies, rules, numbers, or facts.
 
@@ -168,10 +142,7 @@ Answer the user's question using the enterprise
 context above.
 """
 
-    # ----------------------------------------------
-    # Step 4: Gemini
-    # ----------------------------------------------
-
+    # Step 4: Generate an answer using Gemini.
     llm = ChatGoogleGenerativeAI(
         model="gemini-3.5-flash-lite",
         temperature=0,
@@ -181,21 +152,17 @@ context above.
 
     answer = extract_text_from_response(response)
 
-    # ----------------------------------------------
-    # Step 5: Sources
-    # ----------------------------------------------
-
+    # Step 5: Collect unique source filenames.
     sources = []
 
     for document in documents:
-
-        source = document.metadata.get(
+        source_name = document.metadata.get(
             "source",
             "unknown",
         )
 
-        if source not in sources:
-            sources.append(source)
+        if source_name not in sources:
+            sources.append(source_name)
 
     return {
         "answer": answer,
