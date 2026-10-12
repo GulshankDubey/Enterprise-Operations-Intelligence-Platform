@@ -12,51 +12,6 @@ from app.rag.bm25_retriever import (
 )
 from app.rag.vectorstore import load_vectorstore
 
-import re
-
-
-STOP_WORDS = {
-    "a", "an", "the", "is", "are", "was", "were",
-    "what", "which", "who", "when", "where", "why",
-    "how", "does", "do", "did", "can", "could",
-    "would", "should", "about", "for", "from", "with",
-    "and", "or", "to", "of", "in", "on", "by",
-    "me", "my", "it", "say", "tell", "please",
-}
-
-
-def meaningful_terms(text: str) -> set[str]:
-    """Extract meaningful words from a question or chunk."""
-    words = re.findall(r"[a-zA-Z0-9]+", text.lower())
-
-    return {
-        word for word in words
-        if word not in STOP_WORDS and len(word) > 1
-    }
-
-
-def is_relevant_chunk(
-    query: str,
-    document: Document,
-    min_matches: int = 2,
-) -> bool:
-    """
-    Apply a simple lexical relevance check.
-
-    A chunk must share at least min_matches meaningful
-    terms with the query.
-    """
-    query_terms = meaningful_terms(query)
-    document_terms = meaningful_terms(document.page_content)
-
-    # If the query is too short, do not reject everything.
-    if len(query_terms) < min_matches:
-        return True
-
-    matched_terms = query_terms.intersection(document_terms)
-
-    return len(matched_terms) >= min_matches
-
 
 DEFAULT_RRF_K = 60
 DEFAULT_FETCH_K = 10
@@ -65,11 +20,11 @@ DEFAULT_MAX_DISTANCE = 1.0
 
 
 def _document_key(document: Document) -> str:
-    """Create a stable identity for a retrieved document chunk."""
+    """Create a stable identity for a document chunk."""
     metadata = document.metadata or {}
 
-    for key in ("chunk_id", "id"):
-        value = metadata.get(key)
+    for field in ("chunk_id", "id"):
+        value = metadata.get(field)
         if value:
             return str(value)
 
@@ -91,12 +46,7 @@ def reciprocal_rank_fusion(
     ranked_lists: list[list[Document]],
     rrf_k: int = DEFAULT_RRF_K,
 ) -> list[Document]:
-    """
-    Combine ranked lists using Reciprocal Rank Fusion.
-
-    Each unique chunk receives 1 / (rrf_k + rank)
-    from each list in which it appears.
-    """
+    """Fuse ranked lists using Reciprocal Rank Fusion."""
     if rrf_k < 1:
         raise ValueError("rrf_k must be at least 1.")
 
@@ -106,17 +56,17 @@ def reciprocal_rank_fusion(
     sequence = 0
 
     for ranked_documents in ranked_lists:
-        seen_in_this_list: set[str] = set()
+        seen_in_list: set[str] = set()
 
         for rank, document in enumerate(
             ranked_documents, start=1
         ):
             key = _document_key(document)
 
-            if key in seen_in_this_list:
+            if key in seen_in_list:
                 continue
 
-            seen_in_this_list.add(key)
+            seen_in_list.add(key)
             sequence += 1
 
             scores[key] = scores.get(key, 0.0) + (
@@ -145,13 +95,14 @@ def get_hybrid_retriever(
     file_type: str | None = None,
     source: str | None = None,
     rrf_k: int = DEFAULT_RRF_K,
-    max_distance: float = DEFAULT_MAX_DISTANCE,
+    max_distance: float | None = DEFAULT_MAX_DISTANCE,
 ) -> list[Document]:
     """
-    Combine semantic search and BM25 using RRF.
+    Retrieve candidates using semantic search and BM25,
+    combine rankings with RRF, and return up to k chunks.
 
-    Semantic retrieval preserves the Day 6 distance threshold.
-    Both retrieval methods use the same metadata filters.
+    max_distance applies to semantic search only.
+    BM25 candidates are not filtered by semantic distance.
     """
     if not query or not query.strip():
         raise ValueError("query cannot be empty.")
@@ -167,23 +118,21 @@ def get_hybrid_retriever(
     if rrf_k < 1:
         raise ValueError("rrf_k must be at least 1.")
 
-    if max_distance < 0:
+    if max_distance is not None and max_distance < 0:
         raise ValueError(
-            "max_distance must be non-negative."
+            "max_distance must be non-negative or None."
         )
 
-    # Build consistent metadata filters for both methods.
+    # Apply identical metadata scope to both retrieval methods.
     metadata_filter = build_metadata_filter(
         file_type=file_type,
         source=source,
     )
 
-    # 1. Semantic retrieval with raw ChromaDB distances.
+    # 1. Semantic retrieval.
     vectorstore = load_vectorstore()
 
-    search_kwargs: dict[str, Any] = {
-        "k": fetch_k,
-    }
+    search_kwargs: dict[str, Any] = {"k": fetch_k}
 
     if metadata_filter is not None:
         search_kwargs["filter"] = metadata_filter
@@ -198,12 +147,13 @@ def get_hybrid_retriever(
     semantic_documents: list[Document] = []
 
     for document, distance in semantic_results:
-        if distance <= max_distance:
+        if (
+            max_distance is None
+            or distance <= max_distance
+        ):
             semantic_documents.append(document)
 
-    # 2. Keyword retrieval using BM25.
-    # An empty BM25 scope should not prevent semantic results
-    # from being returned.
+    # 2. BM25 keyword retrieval.
     keyword_documents: list[Document] = []
 
     try:
@@ -212,32 +162,23 @@ def get_hybrid_retriever(
             file_type=file_type,
             source=source,
         )
-
         keyword_documents = bm25_retriever.invoke(query)
 
     except ValueError as error:
-        if (
+        expected_message = (
             "No documents found for the requested "
             "BM25 search scope."
-        ) not in str(error):
+        )
+
+        if expected_message not in str(error):
             raise
 
-    # 3. Fuse the two ranked lists.
+    # 3. Fuse rankings and deduplicate chunks.
     fused_documents = reciprocal_rank_fusion(
-        [
-            semantic_documents,
-            keyword_documents,
-        ],
+        [semantic_documents, keyword_documents],
         rrf_k=rrf_k,
     )
 
-
-    # 4. Remove weak matches before selecting the final chunks.
-    relevant_documents = [
-        document
-        for document in fused_documents
-        if is_relevant_chunk(query, document, min_matches=2)
-    ]
-
-    # 5. Return only the best relevant chunks.
-    return relevant_documents[:k]
+    # 4. Return the requested number of candidates.
+    # The reranker will perform the next relevance-selection step.
+    return fused_documents[:k]

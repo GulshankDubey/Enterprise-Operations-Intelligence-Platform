@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.rag.hybrid_retriever import get_hybrid_retriever
+from app.rag.reranker import rerank_documents
 
 
 load_dotenv()
@@ -38,14 +39,14 @@ def extract_text_from_response(response):
 
 
 def build_context(documents):
-    """Build context with source labels for Gemini."""
+    """Build context from the final selected chunks."""
     context_parts = []
 
     for index, document in enumerate(documents, start=1):
-        source_name = document.metadata.get("source", "unknown")
+        source = document.metadata.get("source", "unknown")
 
         context_parts.append(
-            f"[Source {index}: {source_name}]\n"
+            f"[Source {index}: {source}]\n"
             f"{document.page_content}"
         )
 
@@ -54,13 +55,19 @@ def build_context(documents):
 
 def ask_rag(
     question: str,
-    k: int = 3,
+    k: int = 5,
     file_type: str | None = None,
     source: str | None = None,
 ):
     """
-    Hybrid RAG pipeline:
-    Semantic search + BM25 -> RRF -> Gemini -> answer and sources.
+    Hybrid RAG pipeline with cross-encoder reranking.
+
+    Question
+        -> Hybrid candidate retrieval
+        -> Cross-encoder reranking
+        -> Final context
+        -> Gemini answer
+        -> Answer and sources
     """
     if not GOOGLE_API_KEY:
         raise ValueError("GOOGLE_API_KEY is not configured.")
@@ -68,15 +75,34 @@ def ask_rag(
     if not question or not question.strip():
         raise ValueError("Question cannot be empty.")
 
-    # Step 1: Retrieve the best chunks using hybrid search.
-    documents = get_hybrid_retriever(
+    if k < 1:
+        raise ValueError("k must be at least 1.")
+
+    # Day 8: Retrieve a larger candidate pool.
+    candidates = get_hybrid_retriever(
         query=question,
-        k=k,
-        fetch_k=10,
+        k=20,
+        fetch_k=20,
         file_type=file_type,
         source=source,
         rrf_k=60,
         max_distance=1.0,
+    )
+
+    if not candidates:
+        return {
+            "answer": (
+                "I could not find relevant information "
+                "in the enterprise documents."
+            ),
+            "sources": [],
+        }
+
+    # Day 9: Reorder candidates and keep only the best k.
+    documents = rerank_documents(
+        query=question,
+        documents=candidates,
+        top_k=k,
     )
 
     if not documents:
@@ -88,30 +114,23 @@ def ask_rag(
             "sources": [],
         }
 
-    # Step 2: Build context from the selected chunks.
+    # Build context only from the final selected chunks.
     context = build_context(documents)
 
-    # Step 3: Ask Gemini for a concise, grounded answer.
     prompt = f"""
 You are an Enterprise Operations Intelligence Assistant.
 
-Answer the user's question using only the supplied
+Answer the user's question using ONLY the supplied
 enterprise document context.
 
 Rules:
 1. Answer the exact question directly.
-2. Keep the answer concise and easy to understand.
-3. For simple questions, prefer one or two sentences.
-4. For policy questions, use short bullet points when
-   multiple important conditions must be explained.
-5. Include important numbers, deadlines, approvals,
-   and exceptions when relevant to the question.
-6. Do not repeat the same information.
-7. Do not invent policies, numbers, or facts.
-8. If the context does not contain the answer, clearly
-   say that the information was not found.
-9. Do not claim that a source supports a fact unless
-   its supplied content supports that fact.
+2. Be concise and easy to understand.
+3. Preserve important numbers, conditions, and exceptions.
+4. Do not repeat the same information.
+5. Do not invent policies, rules, or facts.
+6. If the answer is unavailable in the context, say so.
+7. Do not assume a currency if the documents do not specify it.
 
 ---------------- ENTERPRISE CONTEXT ----------------
 
@@ -121,12 +140,9 @@ Rules:
 
 {question}
 
----------------- ANSWER ----------------
-
-Provide the concise answer now.
+Answer using only the supplied context.
 """
 
-    # Step 4: Generate the answer using Gemini.
     llm = ChatGoogleGenerativeAI(
         model="gemini-3.5-flash-lite",
         temperature=0,
@@ -135,7 +151,7 @@ Provide the concise answer now.
     response = llm.invoke(prompt)
     answer = extract_text_from_response(response)
 
-    # Step 5: List sources represented in the final context.
+    # Sources are derived from the final reranked chunks.
     sources = []
 
     for document in documents:
