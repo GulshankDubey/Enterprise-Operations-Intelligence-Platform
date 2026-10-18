@@ -6,11 +6,16 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.rag.hybrid_retriever import get_hybrid_retriever
 from app.rag.reranker import rerank_documents
+from app.rag.query_rewriter import rewrite_query
 
 
 load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+ANSWER_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.5-flash-lite",
+)
 
 
 def extract_text_from_response(response):
@@ -18,7 +23,7 @@ def extract_text_from_response(response):
     content = response.content
 
     if isinstance(content, str):
-        return content
+        return content.strip()
 
     if isinstance(content, list):
         text_parts = []
@@ -33,9 +38,9 @@ def extract_text_from_response(response):
             elif isinstance(item, str):
                 text_parts.append(item)
 
-        return "\n".join(text_parts)
+        return "\n".join(text_parts).strip()
 
-    return str(content)
+    return str(content).strip()
 
 
 def build_context(documents):
@@ -58,17 +63,20 @@ def ask_rag(
     k: int = 5,
     file_type: str | None = None,
     source: str | None = None,
+    chat_history: str | None = None,
 ):
     """
-    Hybrid RAG pipeline with cross-encoder reranking.
+    Day 11: Query rewriting + existing hybrid RAG pipeline.
 
-    Question
+    Original question
+        -> Query rewriting using conversation history
         -> Hybrid candidate retrieval
         -> Cross-encoder reranking
-        -> Final context
-        -> Gemini answer
+        -> Context construction
+        -> Gemini answer using the original question
         -> Answer and sources
     """
+
     if not GOOGLE_API_KEY:
         raise ValueError("GOOGLE_API_KEY is not configured.")
 
@@ -78,9 +86,24 @@ def ask_rag(
     if k < 1:
         raise ValueError("k must be at least 1.")
 
-    # Day 8: Retrieve a larger candidate pool.
+    # Preserve the exact question for final answer generation.
+    original_question = question.strip()
+
+    # Day 11: Rewrite the question into a standalone search query.
+    # If rewriting fails, rewrite_query() should return the
+    # original question as a fallback.
+    search_query = rewrite_query(
+        question=original_question,
+        chat_history=chat_history,
+    )
+
+    print(f"Original question: {original_question}")
+    print(f"Rewritten query:   {search_query}")
+
+    # Existing Day 8: Hybrid retrieval.
+    # Only the retrieval query changes; existing settings remain.
     candidates = get_hybrid_retriever(
-        query=question,
+        query=search_query,
         k=20,
         fetch_k=20,
         file_type=file_type,
@@ -96,11 +119,15 @@ def ask_rag(
                 "in the enterprise documents."
             ),
             "sources": [],
+            "original_question": original_question,
+            "rewritten_query": search_query,
         }
 
-    # Day 9: Reorder candidates and keep only the best k.
+    # Existing Day 9: Cross-encoder reranking.
+    # Use the same rewritten query to rank documents against
+    # the search intent used during retrieval.
     documents = rerank_documents(
-        query=question,
+        query=search_query,
         documents=candidates,
         top_k=k,
     )
@@ -112,11 +139,15 @@ def ask_rag(
                 "in the enterprise documents."
             ),
             "sources": [],
+            "original_question": original_question,
+            "rewritten_query": search_query,
         }
 
     # Build context only from the final selected chunks.
     context = build_context(documents)
 
+    # Important: answer the user's original question, not
+    # the rewritten search query.
     prompt = f"""
 You are an Enterprise Operations Intelligence Assistant.
 
@@ -138,20 +169,20 @@ Rules:
 
 ---------------- USER QUESTION ----------------
 
-{question}
+{original_question}
 
 Answer using only the supplied context.
 """
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-3.5-flash-lite",
+        model=ANSWER_MODEL,
         temperature=0,
     )
 
     response = llm.invoke(prompt)
     answer = extract_text_from_response(response)
 
-    # Sources are derived from the final reranked chunks.
+    # Sources come from the final reranked documents.
     sources = []
 
     for document in documents:
@@ -163,4 +194,6 @@ Answer using only the supplied context.
     return {
         "answer": answer,
         "sources": sources,
+        "original_question": original_question,
+        "rewritten_query": search_query,
     }
